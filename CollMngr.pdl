@@ -62,7 +62,7 @@ TYPE CollStp = RECORD GLOBAL
 	
 --const
 
-CONST kr_sw_rel = 0.01   -- Version 
+CONST kr_sw_rel = 0.8   -- Version 
 CONST ks_sw_date = 'Sept 2013'   -- Mod date
 CONST ks_currents_file_name = 'UD:\\COLL\\LOGS\\CURRENTS\\CurrZone_'
 CONST ks_log_file_name = 'UD:\\COLL\\LOGS\\Coll.txt'
@@ -190,7 +190,7 @@ END ru_stp_init
 ----init sts data-----
 ROUTINE ru_sts_init
 BEGIN
-IF VAR_UNINIT(ve_sts.fb_start) THEN
+    ve_sts.fb_start := false
 		ve_sts.fb_cold := false  
 		ve_sts.fb_stby := false  
 		ve_sts.fb_ice := false 
@@ -202,18 +202,18 @@ IF VAR_UNINIT(ve_sts.fb_start) THEN
 		ve_sts.vi_CylcleCounter := 0
 		ve_sts.vi_tempoCycleInSec := 0      
 		ve_sts.vi_time_lstcycle := 0    
-		ve_sts.vi_SaveCounter := 0
-ENDIF  
+		ve_sts.vi_SaveCounter := 0  
 END ru_sts_init
 --fold
 ----init col data----
-ROUTINE ru_coll_init(ae_coll : CollData)
+ROUTINE ru_coll_init(ae_coll : CollData;ab_forceReset:boolean(false)) EXPORTED FROM CollMngr GLOBAL
+ROUTINE ru_coll_init(ae_coll : CollData;ab_forceReset:boolean(false))
 VAR li_for : INTEGER
 BEGIN
 IF VAR_UNINIT(ae_coll.fi_idx) THEN
   ae_coll.fi_idx := -1
 ENDIF
-IF VAR_UNINIT(ae_coll.fi_arm) THEN
+IF VAR_UNINIT(ae_coll.fi_arm) OR ab_forceReset THEN
     ae_coll.fi_arm := $PROG_ARM
     ae_coll.fi_prct := 0
     ae_coll.fb_CmplEnbl := false
@@ -221,8 +221,8 @@ IF VAR_UNINIT(ae_coll.fi_arm) THEN
     ae_coll.fb_det_coll_cold := FALSE
   FOR li_for := 1 TO 6 DO
   	  ae_coll.gi_coll_stp[li_for] := 0
-      ae_coll.gi_coll_cold[li_for] := 10
-      ae_coll.gi_coll_hot[li_for] := 10
+      ae_coll.gi_coll_cold[li_for] := 0
+      ae_coll.gi_coll_hot[li_for] := 0
       ae_coll.gi_cmpl[li_for] := 0
   ENDFOR
 	 ae_coll.fi_ot_counter := 0
@@ -286,7 +286,7 @@ BEGIN
 ve_sts.fb_start := FALSE
   IF NOT FL_STATE(ks_data_save) THEN
     ve_sts.vi_CylcleCounter := 0
-    ve_sts.vi_LogNumbr := ve_setup.fi_max_cycles + 1
+    --ve_sts.vi_LogNumbr := ve_setup.fi_max_cycles + 1
   ENDIF
   IF VAR_UNINIT(ve_sts.fb_save) THEN
     ve_sts.fb_save := TRUE
@@ -614,7 +614,8 @@ END ru_log_collision
 --------------------------------------------------------------------------------------------
 ROUTINE ru_calc_coll(ae_coll : CollData)
 VAR li_i : INTEGER
-VAR vb_ot: BOOLEAN(true)
+VAR lb_ot : BOOLEAN(true)
+VAR lb_rd : BOOLEAN(false)
 VAR ls_s : STRING[128]
 BEGIN
 	--If robot ice cold and no cold dataset.
@@ -635,38 +636,52 @@ ELSE
     IF NOT ae_coll.fb_det_coll_hot AND ve_setup.fb_mstrTchEnbl THEN
      	--to get on target fast.
      	FOR li_i := 1 TO 6 DO
-     		IF ae_coll.gi_coll_hot[li_i] = 10 THEN
+     		IF ae_coll.gi_coll_hot[li_i] = 0 THEN
      			ae_coll.gi_coll_hot[li_i] := (ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])-ve_setup.fi_reduce_step)
      			WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR, ' Axis: ',li_i,' Init sens ! ',ae_coll.gi_coll_hot[li_i],NL)
      		ENDIF
      	ENDFOR
      
       FOR li_i := 1 TO 6 DO
--- If Calc thrs more then x% sensitive than old REDUCE
+-- If calc thrs less then old UP sens
           IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] > (ae_coll.gi_coll_hot[li_i] + ae_coll.fi_ot_prct) THEN
             	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR,  ' Axis: ',li_i,' Increse sens ',ve_setup.fi_reduce_step,'%  ',ae_coll.gi_coll_hot[li_i],' -> ',$ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i],NL)
             	ae_coll.gi_coll_hot[li_i] += ve_setup.fi_reduce_step
-            	vb_ot := false
+            	lb_ot := false
           ELSE
--- If calc thrs less then old UP sens
---IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < (ae_coll.gi_coll_hot[li_i] - ae_coll.fi_ot_prct) THEN
+-- If Calc thrs more then x% sensitive than old REDUCE
 	            IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < (ae_coll.gi_coll_hot[li_i] - 2) THEN
 	              WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR,  ' Axis: ',li_i,' REDUCED SENSITIVITY ! ',ae_coll.gi_coll_hot[li_i],'-> ',ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i]),NL)
 	              ae_coll.gi_coll_hot[li_i] := ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])
-	              ae_coll.fi_ot_counter := 0
-	              vb_ot := false
+	              lb_ot := false
+	              lb_rd := true 
 	            ELSE
---ON TARGET
-          		--WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' ON TARGET',NL)
+								--ON TARGET
 	            ENDIF
           ENDIF
       ENDFOR
       
     --check if all axes on target
-    IF vb_ot THEN
+    IF lb_ot THEN
     	ae_coll.fi_ot_counter += 1
     	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR, ' ON TARGET ',ae_coll.fi_ot_counter,'/',ve_setup.fi_ot,NL)
+    ELSE
+    	
+    	IF (ae_coll.fi_ot_counter > 0) AND lb_rd THEN
+    		ae_coll.fi_ot_counter := 0
+    		WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR, ' OFF TARGET Counter is reset',NL)
+    	ELSE
+    		ae_coll.fi_ot_counter -= 1
+    	ENDIF
+    	
+    	IF (ae_coll.fi_ot_counter <= -5) AND lb_rd  THEN
+	    	ae_coll.fi_ot_prct +=1 
+	    	ae_coll.fi_ot_counter := 0
+	    	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR, ' Increse of OT_prct ',ae_coll.fi_ot_prct,NL)
+	  	ENDIF
+	  	
     ENDIF
+    
     --COMMIT
     IF ae_coll.fi_ot_counter >=  ve_setup.fi_ot THEN
 	  	ENCODE(ls_s,'Coll: HOT CALCULATED:',ae_coll.fi_idx,'  ',ve_sts.vs_LinkedVAR,' From: ',ve_sts.vs_LinkedVARowner)
@@ -686,12 +701,12 @@ END ru_calc_coll
 ROUTINE ru_collision_low(ae_coll : CollData)
 BEGIN
   $COLL_TYPE := ki_coll_dflt
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 1] := 10
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 2] := 10
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 3] := 10
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 4] := 10
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 5] := 10
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 6] := 10
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 1] := 1
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 2] := 1
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 3] := 1
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 4] := 1
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 5] := 1
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 6] := 1
   $CRNT_DATA[ae_coll.fi_arm].COLL_ENBL := ve_setup.fb_mstrEnbl
 END ru_collision_low
 --fold
@@ -829,12 +844,9 @@ BEGIN
 	  TABLE_DEL('colldata')
 	  TABLE_ADD('colldata',$Prog_name,'TabUser', 0x2F)   
 		ru_sts_init
+    ru_coll_init(ve_coll)
   ENDIF
-	--check if cycle already active and end cycle if it is.
-	IF VAR_UNINIT(ve_sts.fb_start) THEN
-		ve_sts.fb_start := false
-	ENDIF
-	
+
  IF ve_sts.fb_start THEN
 	CollisionEnd
 	ve_sts.fb_end := false		
