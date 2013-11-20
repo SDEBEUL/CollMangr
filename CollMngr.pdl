@@ -55,18 +55,21 @@ TYPE CollStp = RECORD GLOBAL
 		vi_tempoCycleInSec : INTEGER --cycle time of last zone in sec
 		vi_time_lstcycle : INTEGER --clock data of last made cycles
 		vi_SaveCounter : INTEGER --savecounter 
+		vs_LinkedVAR : STRING[32]
+		vs_LinkedVARowner : STRING[32]
 	ENDRECORD
+	
 	
 --const
 
 CONST kr_sw_rel = 0.01   -- Version 
 CONST ks_sw_date = 'Sept 2013'   -- Mod date
-CONST ks_currents_file_name = 'UD:\\COLL\\CurrZone_'
-CONST ks_log_file_name = 'UD:\\COLL\\Coll.txt'
-CONST ks_monitor_file_name = 'TD:\\CollMngr.txt' --monitor file 
-CONST ks_old_monitor_file_name = 'TD:\\CollMngrOld.txt' -- monitor file old
-CONST ks_memory_save = 'UD:\\DATA\\CollMngr' 
-CONST ks_data_save = 'UD:\\DATA\\CollMngr.var'
+CONST ks_currents_file_name = 'UD:\\COLL\\LOGS\\CURRENTS\\CurrZone_'
+CONST ks_log_file_name = 'UD:\\COLL\\LOGS\\Coll.txt'
+CONST ks_monitor_file_name = 'UD:\\COLL\\LOGS\\CollMngr.txt' --monitor file 
+CONST ks_old_monitor_file_name = 'UD:\\COLL\\LOGS\\CollMngrOld.txt' -- monitor file old
+CONST ks_memory_save = 'UD:\\COLL\\CollMngr' 
+CONST ks_data_save = 'UD:\\COLL\\CollMngr.var'
 CONST ks_myname = 'CollMngr' --progname
  
  --error codes
@@ -87,6 +90,7 @@ CONST
   ki_sdout_standby = 97  
   ki_sdout_allarme_collision = 137 
   ki_sdout_collision_detected = 138   
+  ki_sdout_teach_enabeld = 12
   ki_event_rob_coll = 197
   ki_no_move = 3  
   
@@ -96,7 +100,9 @@ CONST
   ki_cond_rob_move = 3   
   ki_cond_rob_coll = 5
   ki_cond_rob_current = 6
+  ki_cond_payload = 7
   ki_cond_ch_deconstruct = 17  
+  
  
   -- TIMER
   ki_timer_cycletime = 1  
@@ -109,6 +115,7 @@ CONST
   
   -- error 
   ki_errornum_rob_coll = 62513
+  ki_actpost = 43015 
  
   ki_errstr_len = 100
 --Vars  
@@ -116,8 +123,8 @@ VAR
   -- SAVED GLOBAL VARS
   ve_setup : CollStp EXPORTED FROM CollMngr GLOBAL
   -- NO SAVED GLOBAL VARS
-  ve_sts : Collsts NOSAVE 
-  ve_Coll : CollData NOSAVE
+  ve_sts : Collsts EXPORTED FROM CollMngr GLOBAL NOSAVE 
+  ve_Coll : CollData EXPORTED FROM CollMngr GLOBAL NOSAVE
   wi_prev_coll : ARRAY[6] OF INTEGER NOSAVE
   --version tracker
   ws_file : ARRAY[3] OF STRING[50] NOSAVE
@@ -196,7 +203,7 @@ IF VAR_UNINIT(ve_sts.fb_start) THEN
 		ve_sts.vi_tempoCycleInSec := 0      
 		ve_sts.vi_time_lstcycle := 0    
 		ve_sts.vi_SaveCounter := 0
-ENDIF     
+ENDIF  
 END ru_sts_init
 --fold
 ----init col data----
@@ -372,12 +379,25 @@ BEGIN
 	ENDIF 
 END ru_set_zone_idx
 --fold
+--swtich off standby mode and cold mode
 ROUTINE ru_set_robot_HOT
 BEGIN
+	IF ve_sts.fb_stby OR ve_sts.fb_cold THEN
 	ve_sts.fb_stby := false
 	ve_sts.fb_cold := false
 	WRITE lun_crt('coll: Robot set to HOT mode',nl)
+ENDIF
 END ru_set_robot_HOT
+--fold
+--check if payload not 0
+ROUTINE ru_check_payload
+VAR ls_s : STRING[128]
+BEGIN
+	IF $TOOL_MASS = 0 THEN
+		ENCODE(ls_s,'CollMngr: Tool_Mass 0 @ CollStart',ve_sts.vs_LinkedVAR,' ',ve_sts.vs_LinkedVARowner)
+		ACT_POST(ki_actpost,ls_s)
+	ENDIF 
+END ru_check_payload
 --fold
 --------------------------------------------------------------------------------------------
 --makes a new monitor file and renames current to old
@@ -416,43 +436,53 @@ BEGIN
   IF $ERROR <> 0 THEN
   ELSE
   	
---    IF lb_exist = FALSE THEN
---      --file header
---      WRITE li_lun ('    CREATED  ,', DATE, ' , VERS. 0.6 , SDEBEUL', NL)
---      WRITE li_lun ('-------------------------------------------------------------------------------', NL)
---    ENDIF
+    IF lb_exist = FALSE THEN
+      --file header
+	    --WRITE li_lun ('    CREATED  ,', DATE, ' , VERS. 0.6 , SDEBEUL', NL)
+	    --WRITE li_lun ('-------------------------------------------------------------------------------', NL)
+	    WRITE li_lun ('DATE'::18,' ; ')
+	    WRITE li_lun ('Cycle'::4, ' ; ')
+	    WRITE li_lun ('Zone id '::15,' ; ')
+	    WRITE li_lun ('Zone owner '::10,' ; ')
+	    WRITE li_lun ('time'::4,' ; ')
+	    WRITE li_lun ('STBY '::6, ' ; ')
+	    WRITE li_lun ('COLD '::6,' ; ')
+	    WRITE li_lun ('CD1 , CD2 , CD3 , CD4 , CD5 , CD6 ,    '::36,' ; ')
+	    WRITE li_lun ('CH1 , CH2 , CH3 , CH4 , CH5 , CH6 ,    '::36,' ; ')
+	    WRITE li_lun ('CC1 , CC2 , CC3 , CC4 , CC5 , CC6 ,    '::36,' ; ')
+	    WRITE li_lun ('CA1 , CA2 , CA3 , CA4 , CA5 , CA6 ,    '::36,' ; ')
+	
+    Write li_lun(NL)
+    ENDIF
    
     WRITE li_lun (DATE,' ; ')
-    WRITE li_lun ('C; ', ve_sts.vi_CylcleCounter::4, ' ; ')
-    WRITE li_lun ('Zidx; ' , ae_coll.fi_idx::2,' ; ')
-    WRITE li_lun ('CT; ', ve_sts.vi_tempoCycleInSec::4,' ; ')
-    WRITE li_lun ('STBY; ', ve_sts.fb_stby::6, ' ; ')
-    WRITE li_lun ('CM; ',ve_sts.fb_cold::6,' ; ')
+    WRITE li_lun (ve_sts.vi_CylcleCounter::4, ' ; ')
+    WRITE li_lun (ve_sts.vs_LinkedVAR::15,' ; ')
+    WRITE li_lun (ve_sts.vs_LinkedVARowner::10,' ; ')
+    WRITE li_lun (ve_sts.vi_tempoCycleInSec::4,' ; ')
+    WRITE li_lun (ve_sts.fb_stby::6, ' ; ')
+    WRITE li_lun (ve_sts.fb_cold::6,' ; ')
     
       --deteced coll thres
-      WRITE li_lun ('CD; ') 
 	      FOR li_i := 1 TO 6 DO
 	        WRITE li_lun ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i]::3, ' , ')
 	      ENDFOR
 	     WRITE li_lun(' ; ')
-   
-   IF NOT ve_sts.fb_ice THEN
-      WRITE li_lun ('CH; ')
-	      FOR li_i := 1 TO 6 DO
+ 
+	     FOR li_i := 1 TO 6 DO
 	        WRITE li_lun (ae_coll.gi_coll_hot[li_i], ' , ')
-	      ENDFOR
-	 ELSE
-	 	  WRITE li_lun ('CC; ')
-	      FOR li_i := 1 TO 6 DO
+	     ENDFOR
+			 WRITE li_lun(' ; ')
+			 
+	     FOR li_i := 1 TO 6 DO
 	        WRITE li_lun (ae_coll.gi_coll_cold[li_i], ' , ')
-	      ENDFOR
-	 ENDIF
-	 WRITE li_lun(' ; ')
-	 	 	  WRITE li_lun ('CA; ')
-	      FOR li_i := 1 TO 6 DO
+	     ENDFOR
+	     WRITE li_lun(' ; ')
+	     
+	     FOR li_i := 1 TO 6 DO
 	        WRITE li_lun ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_actual, li_i], ' , ')
-	      ENDFOR
-	WRITE li_lun(' ; ',NL)
+	     ENDFOR
+			WRITE li_lun(' ; ',NL)
   
   CLOSE FILE li_lun
   ENDIF
@@ -474,7 +504,7 @@ END fu_diff_jpos
 ----Routine to log currents of all 6 axxes
 ROUTINE ru_log_currents(ae_coll : CollData)
 CONST ki_smpl = 10
-CONST ki_maxLines = 600
+CONST ki_maxLines = 6000
 VAR li_i , li_count, li_lun : INTEGER 
 VAR ls_file : STRING[50]
 BEGIN
@@ -494,6 +524,7 @@ BEGIN
    WRITE li_lun ('    CREATED  Crash current log,', DATE, ' , VERS. 0.1 , SDEBEUL', NL)
    WRITE li_lun ('-------------------------------------------------------------------------------', NL)
  	 WRITE li_lun ('as1'::6,' , ','as2'::6,' , ','as3'::6,' , ','as4'::6,' , ','as5'::6,' , ','as6'::6,' , ','vel'::6,NL)
+	
 	REPEAT
 	 FOR li_i := 1 TO 6 DO
 	 	 WRITE li_lun($CRNT_DATA[ae_coll.fi_arm].MTR_CURR[li_i]::6,' , ')
@@ -501,15 +532,16 @@ BEGIN
 	 WRITE li_lun($CRNT_DATA[ae_coll.fi_arm].ARM_VEL::6,NL)
 	 DELAY ki_smpl
 	li_count +=1
-	UNTIL (ve_sts.fb_start = false) OR (li_count = ki_maxLines)
-	  SELECT $THRD_CEXP OF
-	  	CASE(1):
+	UNTIL (ve_sts.fb_start = false) OR (li_count > ki_maxLines)
+	
+	IF (li_count < ki_maxLines) THEN
 	  		WRITE li_lun ('----Zone completed',nl)
-			 	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' COMPLETED SUCCES',NL)
-	  	CASE(2):
+			 	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' COMPLETED SUCCES',li_count,NL)
+	 ELSE
 	  		WRITE li_lun ('----Could not complete zone... Maxline err',nl)
-		  	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' COMPLETED FAIL',NL)
-	  ENDSELECT
+		  	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' COMPLETED FAIL Maxline ERR',li_count,NL)
+	 ENDIF 
+
 	CLOSE FILE li_lun
  ENDIF
   ERR_TRAP_OFF(39990)
@@ -519,12 +551,18 @@ END ru_log_currents
 ROUTINE ru_log_collision(ae_coll : CollData)
 VAR li_i, li_lun : INTEGER
 VAR lb_exist : BOOLEAN
+VAR ls_s : STRING[128]
 VAR pi_joint_start, pi_joint_stop : JOINTPOS
+VAR lg_b_state : ARRAY[8] OF BOOLEAN
 BEGIN
+  FOR li_i := 1 TO 8 DO
+  	lg_b_state[li_i] := $SDIN[li_i+32]
+  ENDFOR
+	--
 	pi_joint_start := ARM_JNTP
 	DELAY $TUNE[25] --systeem var for locking the arm 
 	pi_joint_stop := ARM_JNTP
-  
+  --
   ERR_TRAP_ON(39990)
   lb_exist := FL_STATE(ks_log_file_name)
   $ERROR := 0
@@ -537,17 +575,27 @@ BEGIN
    WRITE li_lun ('-------------------------------------------------------------------------------', NL)
   ENDIF
 	--
-  WRITE li_lun ('Crash logged for zone: ', ae_coll.fi_idx, NL)
+  WRITE li_lun ('Crash logged for zone: ', ae_coll.fi_idx,'  ',ve_sts.vs_LinkedVAR,' From: ',ve_sts.vs_LinkedVARowner, NL)
   WRITE li_lun ('logged on    ', DATE, NL)
   --jointpos log
   WRITE li_lun ('Jointpos on start was:  ', pi_joint_start, NL)
   WRITE li_lun ('Jointpos on stop  was:  ', pi_joint_stop, NL)
   WRITE li_lun ('Jointpos deflection  :  ',fu_diff_jpos(pi_joint_start,pi_joint_stop) ,NL)
+  --safety log
+  WRITE li_lun ('Safety: ')
+  FOR li_i := 1 TO 8 DO
+  	WRITE li_lun ('$SDIN[',li_i+32,']=',$SDIN[li_i+32],' , ')
+  ENDFOR 
+  WRITE li_lun (NL)
   --chain log
   WRITE li_lun ('PROGRAM chain on crash', NL)
   ERR_TRAP_ON(39960)   -- trap SYS_CALL errors
   $SYS_CALL_OUT := li_lun   -- directs sys_call output to Logfile
   SYS_CALL('pv/c', 'rsssssrr')   --send system command program view/chain down the pipe
+  WRITE li_lun (NL,'---------------------Ve_coll DATA---------------------', NL)
+  SYS_CALL('mvv', 'Collmngr','ve_coll')
+  WRITE li_lun (NL,'---------------------Ve_STS DATA---------------------', NL)
+  SYS_CALL('mvv', 'Collmngr','ve_sts')
   ERR_TRAP_OFF(39960)
   --trapping to handle case that rsssssrr is not active  
   IF $SYS_CALL_STS > 0 THEN   -- check status of SYS_CALL
@@ -555,7 +603,8 @@ BEGIN
     RETURN
   ENDIF
   WRITE li_lun (NL,'-----------------------------------------------------------------------------------', NL)
-  WRITE lun_crt ('Coll: LOGGED for zone: ',ae_coll.fi_idx,nl)
+  ENCODE(ls_s,'CollMngr: Logged for zone: ',ae_coll.fi_idx,'  ',ve_sts.vs_LinkedVAR,' From: ',ve_sts.vs_LinkedVARowner)
+  ACT_POST(ki_actpost,ls_s)
 	CLOSE FILE li_lun
   ENDIF
   ERR_TRAP_OFF(39990)
@@ -566,14 +615,18 @@ END ru_log_collision
 ROUTINE ru_calc_coll(ae_coll : CollData)
 VAR li_i : INTEGER
 VAR vb_ot: BOOLEAN(true)
+VAR ls_s : STRING[128]
 BEGIN
 	--If robot ice cold and no cold dataset.
-IF (ae_coll.fb_det_coll_cold = FALSE)  AND (ve_sts.fb_ice = true) THEN
-      WRITE lun_crt('Coll: Collision COLD CALCULATED:',ae_coll.fi_idx,NL)
+IF (ae_coll.fb_det_coll_cold = FALSE)  AND (ve_sts.fb_ice = true) AND (ae_coll.fb_det_coll_hot = true)  THEN
       ae_coll.fb_det_coll_cold := TRUE
+      ENCODE(ls_s,'Coll: COLD CALCULATED:',ae_coll.fi_idx,'  ',ve_sts.vs_LinkedVAR,' From: ',ve_sts.vs_LinkedVARowner)
+  	  ACT_POST(ki_actpost,ls_s)
       FOR li_i := 1 TO 6 DO   
-        IF ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < ae_coll.gi_coll_cold[li_i]) OR (ae_coll.gi_coll_cold[li_i] = 10) THEN
-           ae_coll.gi_coll_cold[li_i] := ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])
+        IF ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] <(ae_coll.gi_coll_hot[li_i]-10)) THEN
+          ae_coll.gi_coll_cold[li_i] := ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])
+        ELSE
+          ae_coll.gi_coll_cold[li_i] := ae_coll.gi_coll_hot[li_i]-10
         ENDIF
       ENDFOR  
       
@@ -584,21 +637,21 @@ ELSE
      	FOR li_i := 1 TO 6 DO
      		IF ae_coll.gi_coll_hot[li_i] = 10 THEN
      			ae_coll.gi_coll_hot[li_i] := (ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])-ve_setup.fi_reduce_step)
-     			WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' Init sens ! ',ae_coll.gi_coll_hot[li_i],NL)
+     			WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR, ' Axis: ',li_i,' Init sens ! ',ae_coll.gi_coll_hot[li_i],NL)
      		ENDIF
      	ENDFOR
      
       FOR li_i := 1 TO 6 DO
 -- If Calc thrs more then x% sensitive than old REDUCE
           IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] > (ae_coll.gi_coll_hot[li_i] + ae_coll.fi_ot_prct) THEN
-            	WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' Increse sens ',ve_setup.fi_reduce_step,'%  ',ae_coll.gi_coll_hot[li_i],' -> ',$ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i],NL)
+            	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR,  ' Axis: ',li_i,' Increse sens ',ve_setup.fi_reduce_step,'%  ',ae_coll.gi_coll_hot[li_i],' -> ',$ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i],NL)
             	ae_coll.gi_coll_hot[li_i] += ve_setup.fi_reduce_step
             	vb_ot := false
           ELSE
 -- If calc thrs less then old UP sens
 --IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < (ae_coll.gi_coll_hot[li_i] - ae_coll.fi_ot_prct) THEN
 	            IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < (ae_coll.gi_coll_hot[li_i] - 2) THEN
-	              WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' REDUCED SENSITIVITY ! ',ae_coll.gi_coll_hot[li_i],'-> ',ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i]),NL)
+	              WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR,  ' Axis: ',li_i,' REDUCED SENSITIVITY ! ',ae_coll.gi_coll_hot[li_i],'-> ',ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i]),NL)
 	              ae_coll.gi_coll_hot[li_i] := ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])
 	              ae_coll.fi_ot_counter := 0
 	              vb_ot := false
@@ -612,12 +665,14 @@ ELSE
     --check if all axes on target
     IF vb_ot THEN
     	ae_coll.fi_ot_counter += 1
-    	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ON TARGET ',ae_coll.fi_ot_counter,'/',ve_setup.fi_ot,NL)
+    	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ',ve_sts.vs_LinkedVAR, ' ON TARGET ',ae_coll.fi_ot_counter,'/',ve_setup.fi_ot,NL)
     ENDIF
     --COMMIT
     IF ae_coll.fi_ot_counter >=  ve_setup.fi_ot THEN
-     	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' HOT COMPLETED :)!',NL)
+	  	ENCODE(ls_s,'Coll: HOT CALCULATED:',ae_coll.fi_idx,'  ',ve_sts.vs_LinkedVAR,' From: ',ve_sts.vs_LinkedVARowner)
+  		ACT_POST(ki_actpost,ls_s)
     	ae_coll.fb_det_coll_hot := true 
+    	ae_coll.fi_ot_counter := 0
     	ru_commit_setup(ae_coll)
     	ru_save_var
     ENDIF
@@ -630,15 +685,13 @@ END ru_calc_coll
 ----Sets the default coll data to the default value-----
 ROUTINE ru_collision_low(ae_coll : CollData)
 BEGIN
- 
-  -- collision sempre attive per sicurezza
   $COLL_TYPE := ki_coll_dflt
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 1] := 40
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 2] := 30
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 3] := 30
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 4] := 30
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 5] := 30
-  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 6] := 25
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 1] := 10
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 2] := 10
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 3] := 10
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 4] := 10
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 5] := 10
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 6] := 10
   $CRNT_DATA[ae_coll.fi_arm].COLL_ENBL := ve_setup.fb_mstrEnbl
 END ru_collision_low
 --fold
@@ -702,7 +755,7 @@ END ru_swap_collision
 ROUTINE ru_red_active(ai_prct : INTEGER)
 VAR li_i, Li_rid : INTEGER
 BEGIN
-	WRITE lun_crt ('Coll: Stby mode:  Active coll set reduced by ',ai_prct,' %',nl)
+	WRITE lun_crt ('Coll: Active coll set reduced by ',ai_prct,' %',nl)
 	FOR li_i := 1 to 6 DO
 	  li_rid := ($ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i] * ai_prct) DIV 100 
     $ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i] := ROUND($ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i] - li_rid)
@@ -735,6 +788,7 @@ BEGIN
   IF ve_Coll.fb_det_coll_hot THEN
     WHILE PROG_STATE(ks_myname) > 0 DO
       DELAY 50 --Bug reported .. stuk after pwrfail rec !
+      SYS_CALL('PD',ks_myname)
     ENDWHILE
     ve_sts.vi_SaveCounter += 1
   ENDIF
@@ -761,7 +815,7 @@ BEGIN
   --unlink the object
   VAR_UNLINK(ve_Coll)
   IF $THRD_ERROR <> 0 THEN
-    ERR_POST(ki_err_var_unlink, 'Variable unlink', 4, 0x240)
+    ERR_POST(ki_err_var_unlink, 'Variable unlink', 2, 0x240)
   ENDIF
 END CollisionEnd
 
@@ -771,7 +825,11 @@ ROUTINE CollisionStart(ae_coll : CollData)
 VAR li_i : INTEGER
 BEGIN
 	ru_stp_init
-	
+	IF VAR_UNINIT(ve_sts.fb_start) THEN
+	  TABLE_DEL('colldata')
+	  TABLE_ADD('colldata',$Prog_name,'TabUser', 0x2F)   
+		ru_sts_init
+  ENDIF
 	--check if cycle already active and end cycle if it is.
 	IF VAR_UNINIT(ve_sts.fb_start) THEN
 		ve_sts.fb_start := false
@@ -796,7 +854,7 @@ BEGIN
   IF $THRD_ERROR <> 0 THEN
     ERR_POST(ki_err_var_link, 'Variable link ', 4, 0x240)
   ENDIF
-  
+  VAR_LINK_INFO(ve_coll,ve_sts.vs_LinkedVAR,ve_sts.vs_LinkedVARowner)
   ru_check_var(ae_coll)
   ru_set_zone_idx(ae_coll)
 
@@ -806,7 +864,7 @@ BEGIN
   IF $SDOUT[11] OR $SDOUT[17] OR $SDOUT[1] THEN
     ru_activate_me
   ENDIF
-
+  ru_set_robot_HOT
 --Run in HOT mode  
   --If FULL auto and init detection done 
   IF ($GEN_OVR = 100) AND (ve_sts.fb_stby = FALSE) AND (ae_coll.fb_det_coll_hot = TRUE) AND ($SDOUT[ki_sdout_sel_manu] = OFF) THEN
@@ -850,15 +908,18 @@ END CollisionSetSoftTeach
 --------------------------------------------------------------------------------------------
  ---- MAIN ----
 BEGIN
-	ru_sts_init
   ve_sts.fb_start := FALSE
   
   -- CONDITION Drive of OR cold cold activeation. (robot must already be in standby for this)
   CONDITION[ki_cond_check_allarm] :
     WHEN $SDOUT[ki_sdout_drive_on]- OR ($TIMER[ki_timer_time_out] > ve_setup.fi_tempo_active_coll_cold) DO
+      ve_sts.fb_cold := true 
       ru_swap_collision(ve_Coll)
     WHEN $GEN_OVR < 100 DO
+			ve_sts.fb_cold := true 
 			ru_swap_collision(ve_Coll)
+		WHEN $SDOUT[ki_sdout_teach_enabeld]+ DO 
+      ru_red_active(ve_setup.fi_Stby_prct)
     WHEN ve_sts.fb_start = FALSE DO --to purge condition
   ENDCONDITION
   
@@ -867,6 +928,7 @@ BEGIN
     WHEN $CRNT_DATA[ve_Coll.fi_arm].MOVE_STATE <= ki_no_move DO
       $TIMER[ki_timer_time_out] := 0
       ve_sts.fb_rob_move := true
+      ve_sts.fb_stby := false
       ENABLE CONDITION[ki_cond_rob_move]
     WHEN ve_sts.fb_start = FALSE DO
   ENDCONDITION
@@ -877,6 +939,7 @@ BEGIN
     	ve_sts.fb_rob_move := false
       ENABLE CONDITION[ki_cond_time_out]
     WHEN $TIMER[ki_timer_time_out] > ve_setup.fi_tempo_active_reduce DO
+      ve_sts.fb_stby := true 
       ru_red_active(ve_setup.fi_Stby_prct)
     WHEN ve_sts.fb_start = FALSE DO
   ENDCONDITION
@@ -885,6 +948,12 @@ BEGIN
   CONDITION[ki_cond_rob_coll]:
   	WHEN EVENT ki_event_rob_coll OR ERRORNUM ki_errornum_rob_coll DO 
   		ru_log_collision(ve_coll)
+  ENDCONDITION
+  
+  --toolMass Monitor
+  CONDITION[ki_cond_payload]:
+  	WHEN ($TOOL_MASS = 0) DO
+  		ru_check_payload
   ENDCONDITION
   
   --currentlog
@@ -896,12 +965,16 @@ BEGIN
   WAIT FOR ve_sts.fb_start
   	ENABLE CONDITION[ki_cond_rob_coll]
   	ENABLE CONDITION[ki_cond_check_allarm]
+  	ENABLE CONDITION[ki_cond_payload]
+  		
   IF ve_setup.fi_tempo_active_reduce <> 0 THEN
   	ENABLE CONDITION[ki_cond_time_out]
 	ENDIF
+	
 	IF ve_setup.fb_Dbg THEN
     ENABLE CONDITION[ki_cond_rob_current]
   ENDIF
+  
   WAIT FOR ve_sts.fb_start = OFF
   
   --If true save var
