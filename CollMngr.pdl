@@ -1,0 +1,916 @@
+-- $PROP_REVISION:1.01$
+-- $PROP_TITLE: Collision Manager$
+-- $PROP_HELP: It is the owner of Collision_Start() and Collision_end. Last update dated sept-2013 SDEBEUL
+--
+PROGRAM CollMngr NOHOLD, STACK = 2048
+  
+ -- CollData
+TYPE CollData = RECORD GLOBAL
+    fi_idx : INTEGER   -- index
+    fi_arm : INTEGER   -- ARM number
+    fi_prct :INTEGER   -- % of reduction for this zone
+    fb_CmplEnbl : BOOLEAN -- compliance enbl
+    fb_det_coll_hot : BOOLEAN --hot data set calculated
+    fb_det_coll_cold : BOOLEAN --cold data set calculated
+    fi_ot_counter : INTEGER -- number of cycles completed on target 
+    fi_ot_prct : INTEGER -- % of deceation allowed in this zone.
+    gi_coll_stp : ARRAY[6] OF INTEGER --collThreashHold per ax HOT SETUP ! 
+    gi_coll_cold : ARRAY[6] OF INTEGER --collThreashHold per ax COLD
+    gi_coll_hot : ARRAY[6] OF INTEGER --collThreashHold per ax HOT
+    gi_cmpl : ARRAY[6] OF INTEGER --compliance data
+  ENDRECORD
+ 
+ --Master setup record for the collmanager
+TYPE CollStp = RECORD GLOBAL
+		fb_mstrEnbl : BOOLEAN --master coll enbl
+		fb_mstrCmplEnbl : BOOLEAN --master compliance enbl
+		fb_mstrTchEnbl : BOOLEAN --teach enbl
+		fb_Dbg : BOOLEAN --debug data boolean
+		fi_CollEffect : INTEGER -- coll effect 0 error 1 hold 2 event 
+		fi_mstrPrct : INTEGER --master % reduction
+		fi_max_cycles : INTEGER  -- max aantal cycles dat in de logfile worden bewaard
+		fi_tempo_standby : INTEGER -- tijd tussen 2 cycles om naar standby mode te gaan.
+		fi_tempo_active_reduce : INTEGER -- tempo om timeout te detecteren in mili 
+		fi_tempo_active_coll_cold : INTEGER --tempo om over te gaan van cold naar hot mode in mili 
+		fi_tempo_active_coll_ice : INTEGER -- tempo om over te gaan naar ICE mode
+		fi_ot : INTEGER -- number of cycles needed ON TARGET to commit data.
+		fi_reduce_step : INTEGER -- % of reduction to get OT
+		fi_Stby_prct : INTEGER --% of reduction comming out of standby
+		fi_zone_counter : INTEGER --to keep track of number of used zones and provice reff for colldata idx
+		fb_sysPrct : BOOLEAN --use system % reduction $A_ALONG_2D[10,ax] init = 6% first 3 and 7% of wrist (drive ful scale)
+		gi_sysPrct : ARRAY[6] OF INTEGER -- % reduction per axes (costum data)
+	ENDRECORD
+	
+	--Status record of the collmanager
+	TYPE Collsts = RECORD GLOBAL
+		fb_cold : BOOLEAN --cold mode active
+		fb_stby : BOOLEAN -- standby mode active
+		fb_ice : BOOLEAN -- ice mode active
+		fb_start : BOOLEAN -- cycle active
+		fb_end : BOOLEAN --cycle end 
+		fb_rob_move : BOOLEAN --robot is moving
+		fb_save : BOOLEAN --save request
+		vi_LogNumbr : INTEGER --number of log in active file
+		vi_CylcleCounter : INTEGER -- number of cycles made
+		vi_tempoCycleInSec : INTEGER --cycle time of last zone in sec
+		vi_time_lstcycle : INTEGER --clock data of last made cycles
+		vi_SaveCounter : INTEGER --savecounter 
+	ENDRECORD
+	
+--const
+
+CONST kr_sw_rel = 0.01   -- Version 
+CONST ks_sw_date = 'Sept 2013'   -- Mod date
+CONST ks_currents_file_name = 'UD:\\COLL\\CurrZone_'
+CONST ks_log_file_name = 'UD:\\COLL\\Coll.txt'
+CONST ks_monitor_file_name = 'TD:\\CollMngr.txt' --monitor file 
+CONST ks_old_monitor_file_name = 'TD:\\CollMngrOld.txt' -- monitor file old
+CONST ks_memory_save = 'UD:\\DATA\\CollMngr' 
+CONST ks_data_save = 'UD:\\DATA\\CollMngr.var'
+CONST ks_myname = 'CollMngr' --progname
+ 
+ --error codes
+CONST ki_err_var_link = 43143   
+CONST ki_err_prog_deactivate = 43142
+CONST ki_err_prog_activate = 43141
+CONST ki_err_var_uninit = 43140
+CONST ki_err_file_delete = 43139
+CONST ki_err_file_rename = 43138
+CONST ki_err_var_unlink = 43137
+CONST ki_err_memory_save = 43136
+  
+CONST  
+  -- Inputs
+  ki_sdout_drive_on = 9  
+  ki_sdout_sel_manu = 112   
+  ki_sdout_move_esec = 99 
+  ki_sdout_standby = 97  
+  ki_sdout_allarme_collision = 137 
+  ki_sdout_collision_detected = 138   
+  ki_event_rob_coll = 197
+  ki_no_move = 3  
+  
+  -- CONDITION
+  ki_cond_check_allarm = 1   
+  ki_cond_time_out = 2   
+  ki_cond_rob_move = 3   
+  ki_cond_rob_coll = 5
+  ki_cond_rob_current = 6
+  ki_cond_ch_deconstruct = 17  
+ 
+  -- TIMER
+  ki_timer_cycletime = 1  
+  ki_timer_time_out = 2  
+  
+  ki_coll_detect = 5   
+  ki_coll_actual = 6  
+  ki_coll_base = 7   
+  ki_coll_dflt = 10  
+  
+  -- error 
+  ki_errornum_rob_coll = 62513
+ 
+  ki_errstr_len = 100
+--Vars  
+VAR
+  -- SAVED GLOBAL VARS
+  ve_setup : CollStp EXPORTED FROM CollMngr GLOBAL
+  -- NO SAVED GLOBAL VARS
+  ve_sts : Collsts NOSAVE 
+  ve_Coll : CollData NOSAVE
+  wi_prev_coll : ARRAY[6] OF INTEGER NOSAVE
+  --version tracker
+  ws_file : ARRAY[3] OF STRING[50] NOSAVE
+  vtvr_ver : REAL EXPORTED FROM vtu
+ 
+ROUTINE ver EXPORTED FROM CollMngr 
+ROUTINE ver
+VAR li_lang : INTEGER
+BEGIN
+  IF PROG_STATE('vtu') > 0 THEN
+    vtvr_ver := kr_sw_rel
+  ELSE
+    li_lang := ($RBT_CNFG SHR 8) AND 0x7
+    IF li_lang = 1 THEN
+      -- italiano
+      ws_file[1] := 'Programma COLLISION Manager Versione : '
+      ws_file[2] := 'COLLISION Manager V: '
+      ws_file[3] := 'Data ultima modifica: '
+    ELSE
+      -- comprende l'inglese
+      ws_file[1] := 'COLLISION Manager Program Version : '
+      ws_file[2] := 'COLLISION Manager V: '
+      ws_file[3] := 'Last modification date: '
+    ENDIF
+    
+    WIN_CLEAR(WIN_CLR_ALL, 'CRT:');  WIN_CLEAR(WIN_CLR_ALL, 'TP:')
+    WIN_SET_CRSR(5, 3, 'CRT:');  WIN_SET_CRSR(5, 1, 'TP:')
+    WRITE LUN_CRT (ws_file[1], kr_sw_rel::2::2, NL)
+    WRITE LUN_TP (ws_file[2], kr_sw_rel::2::2, NL)
+    WIN_SET_CRSR(6, 3, 'CRT:');  WIN_SET_CRSR(6, 1, 'TP:')
+    WRITE LUN_CRT (ws_file[3], ks_sw_date)
+    WRITE LUN_TP (ws_file[3], ks_sw_date)
+  ENDIF
+END ver
+--fold
+--------------------------------------------------------------------------------------------
+----init setup data-----
+ROUTINE ru_stp_init
+VAR li_i : INTEGER
+BEGIN
+	IF VAR_UNINIT(ve_setup.fb_mstrcmplEnbl) THEN
+		ve_setup.fb_mstrEnbl := TRUE --master coll enbl
+		ve_setup.fb_mstrCmplEnbl := FALSE    --master compliance enbl
+		ve_setup.fb_mstrTchEnbl := true   --teach enbl
+		ve_setup.fb_Dbg := false   --debug data boolean
+		ve_setup.fi_CollEffect := 2      -- coll effect 0 error 1 hold 2 event
+		ve_setup.fi_mstrPrct := 0      --master % reduction
+		ve_setup.fb_sysPrct := true      --system % reduction
+		FOR li_i := 1 to 6 DO
+			ve_setup.gi_sysPrct[li_i] := $A_ALONG_2D[10,li_i]
+	  ENDFOR
+		ve_setup.fi_max_cycles := 500      -- max aantal cycles dat in de logfile worden bewaard
+		ve_setup.fi_tempo_standby := 1800   -- tijd tussen 2 cycles om naar standby mode te gaan in sec 30 min
+		ve_setup.fi_tempo_active_reduce := 5000   -- tempo om timeout te detecteren in mili 5sec
+		ve_setup.fi_tempo_active_coll_cold := 30000  --tempo om over te gaan van cold naar hot mode in mili 5min
+		ve_setup.fi_tempo_active_coll_ice := 28800 -- temp om ice mode te activeren in sec 8U
+		ve_setup.fi_ot := 20 
+		ve_setup.fi_reduce_step := 2
+		ve_setup.fi_Stby_prct := 15
+	ENDIF
+END ru_stp_init
+--fold
+----init sts data-----
+ROUTINE ru_sts_init
+BEGIN
+IF VAR_UNINIT(ve_sts.fb_start) THEN
+		ve_sts.fb_cold := false  
+		ve_sts.fb_stby := false  
+		ve_sts.fb_ice := false 
+		ve_sts.fb_start := false 
+		ve_sts.fb_end := false 
+		ve_sts.fb_rob_move := false 
+		ve_sts.fb_save := false 
+		ve_sts.vi_LogNumbr := 0      
+		ve_sts.vi_CylcleCounter := 0
+		ve_sts.vi_tempoCycleInSec := 0      
+		ve_sts.vi_time_lstcycle := 0    
+		ve_sts.vi_SaveCounter := 0
+ENDIF     
+END ru_sts_init
+--fold
+----init col data----
+ROUTINE ru_coll_init(ae_coll : CollData)
+VAR li_for : INTEGER
+BEGIN
+IF VAR_UNINIT(ae_coll.fi_idx) THEN
+  ae_coll.fi_idx := -1
+ENDIF
+IF VAR_UNINIT(ae_coll.fi_arm) THEN
+    ae_coll.fi_arm := $PROG_ARM
+    ae_coll.fi_prct := 0
+    ae_coll.fb_CmplEnbl := false
+    ae_coll.fb_det_coll_hot := FALSE
+    ae_coll.fb_det_coll_cold := FALSE
+  FOR li_for := 1 TO 6 DO
+  	  ae_coll.gi_coll_stp[li_for] := 0
+      ae_coll.gi_coll_cold[li_for] := 10
+      ae_coll.gi_coll_hot[li_for] := 10
+      ae_coll.gi_cmpl[li_for] := 0
+  ENDFOR
+	 ae_coll.fi_ot_counter := 0
+	 ae_coll.fi_ot_prct := 5
+ENDIF
+END ru_coll_init
+--fold
+--Commit current hot data to setup
+ROUTINE ru_commit_setup(ae_coll : CollData)
+VAR li_i : INTEGER
+BEGIN
+	FOR li_i := 1 TO 6 DO
+		ae_coll.gi_coll_stp[li_i] := ae_coll.gi_coll_hot[li_i]
+	ENDFOR
+END ru_commit_setup
+--fold
+----find the next free cond handeler----
+ROUTINE rb_def_cond(ai_ch : INTEGER) : BOOLEAN
+BEGIN
+  RETURN(BIT_TEST($PROG_CONDS[(ai_ch - 1) DIV 30 + 1], (ai_ch - 1) MOD 30 + 1))
+END rb_def_cond
+--fold 
+----Save the coll data vars-----
+ROUTINE ru_save_var
+VAR ls_temp : STRING[ki_errstr_len]
+BEGIN
+  ERR_TRAP_ON(39960)
+  $SYS_CALL_STS := 0
+  SYS_CALL('MS/AO', ks_myname, ks_memory_save)
+  IF $SYS_CALL_STS <> 0 THEN
+    ls_temp := STR_CAT('Save file error ', ks_myname)
+    ERR_POST(ki_err_memory_save, ls_temp, 4, 0x240)
+    -- WRITE LUN_TP (ks_myname, ' Sys_call(MS/AO) Error: ', $ERROR, NL)
+  ENDIF
+  ERR_TRAP_OFF(39960)
+END ru_save_var
+--fold
+----to check Max time of cycle / Time between cycles / ICE MODE
+ROUTINE ru_check_runmode(ae_coll : CollData)
+BEGIN
+	--Check if standby mode needed
+  IF (CLOCK > ve_sts.vi_time_lstcycle + ve_setup.fi_tempo_standby) AND ve_sts.fb_end THEN
+    WRITE lun_crt('Coll: ','standby mode on ',NL)
+    ve_sts.fb_stby := TRUE
+  ELSE
+    ve_sts.fb_stby := FALSE
+  ENDIF
+--check if robot ice cold
+   IF (CLOCK > ve_sts.vi_time_lstcycle + ve_setup.fi_tempo_active_coll_ice) AND ve_sts.fb_end THEN
+    WRITE lun_crt('Coll: ','ICE mode on ',NL)
+    ve_sts.fb_ice := TRUE
+  ELSE
+    --ve_sts.fb_ice := FALSE
+  ENDIF
+  $TIMER[ki_timer_time_out] := 0 
+END ru_check_runmode
+--fold
+ROUTINE ru_check_var(ae_coll : CollData)
+VAR li_for, li_i : INTEGER
+BEGIN
+ve_sts.fb_start := FALSE
+  IF NOT FL_STATE(ks_data_save) THEN
+    ve_sts.vi_CylcleCounter := 0
+    ve_sts.vi_LogNumbr := ve_setup.fi_max_cycles + 1
+  ENDIF
+  IF VAR_UNINIT(ve_sts.fb_save) THEN
+    ve_sts.fb_save := TRUE
+  ENDIF
+	FOR li_for:=1 to 6 DO
+		IF VAR_UNINIT(wi_prev_coll[li_for]) THEN
+		  wi_prev_coll[li_for] := 10
+		ENDIF
+	ENDFOR
+  IF VAR_UNINIT(ve_sts.fb_cold) THEN
+  	ve_sts.fb_cold := FALSE
+  ENDIF
+  IF VAR_UNINIT(ve_sts.fb_ice) THEN
+  	ve_sts.fb_ice := FALSE
+  ENDIF
+  IF VAR_UNINIT(ve_sts.vi_time_lstcycle) THEN
+    ve_sts.vi_time_lstcycle := CLOCK
+  ENDIF
+    IF VAR_UNINIT(ve_sts.vi_LogNumbr) THEN
+    ve_sts.vi_LogNumbr := 0
+  ENDIF
+  
+  IF VAR_UNINIT(ve_sts.vi_CylcleCounter) THEN
+    ve_sts.vi_CylcleCounter := 0
+  ENDIF
+  
+  IF VAR_UNINIT(ve_sts.vi_SaveCounter) THEN
+    ve_sts.vi_SaveCounter := 1
+  ENDIF
+--
+ru_coll_init(ae_coll)
+-- 
+ru_check_runmode(ae_coll)  
+-- CONDITION DECONSTRUCTOR
+  IF NOT rb_def_cond(ki_cond_ch_deconstruct) THEN
+    CONDITION[ki_cond_ch_deconstruct] :
+      WHEN DEACTIVATE DO
+        ve_sts.fb_start := FALSE
+        ve_sts.fb_save := TRUE
+    ENDCONDITION
+  ENDIF
+  
+  IF COND_ENABLED(ki_cond_ch_deconstruct) = FALSE THEN
+    ENABLE CONDITION[ki_cond_ch_deconstruct]
+  ENDIF
+--
+END ru_check_var
+--fold
+----Stops the manager----
+ROUTINE ru_deact_me
+VAR ls_temp : STRING[ki_errstr_len]
+BEGIN
+  ERR_TRAP_ON(39960)
+  IF PROG_STATE(ks_myname) > 0 THEN
+    $SYS_CALL_STS := 0
+    SYS_CALL('pd', ks_myname)
+    IF $SYS_CALL_STS <> 0 THEN
+      ls_temp := STR_CAT('Program deactivate error', ks_myname)
+      ERR_POST(ki_err_prog_deactivate, ls_temp, 4, 0x240)
+      -- WRITE LUN_TP (ks_myname, ' Sys_call(PD) Error: ', $ERROR, NL)
+    ENDIF
+  ENDIF
+  ERR_TRAP_OFF(39960)
+END ru_deact_me
+--fold 
+----runs the manager----
+ROUTINE ru_activate_me
+VAR ls_temp : STRING[ki_errstr_len]
+BEGIN
+  ERR_TRAP_ON(39960)
+  $SYS_CALL_STS := 0
+  SYS_CALL('pa', ks_myname)
+  IF $SYS_CALL_STS <> 0 THEN
+    ls_temp := STR_CAT('Program activate error', ks_myname)
+    ERR_POST(ki_err_prog_activate, ls_temp, 4, 0x240)
+  ENDIF
+  ERR_TRAP_OFF(39960)
+END ru_activate_me
+--fold
+--Gives a zone number to the zone if not manualy set.
+ROUTINE ru_set_zone_idx(ae_coll : CollData)
+BEGIN
+	IF VAR_UNINIT(ve_setup.fi_zone_counter) THEN
+		ve_setup.fi_zone_counter := 1
+	ENDIF 
+	
+	IF ae_coll.fi_idx = -1 THEN
+		ae_coll.fi_idx := ve_setup.fi_zone_counter
+		ve_setup.fi_zone_counter += 1
+	ENDIF 
+END ru_set_zone_idx
+--fold
+ROUTINE ru_set_robot_HOT
+BEGIN
+	ve_sts.fb_stby := false
+	ve_sts.fb_cold := false
+	WRITE lun_crt('coll: Robot set to HOT mode',nl)
+END ru_set_robot_HOT
+--fold
+--------------------------------------------------------------------------------------------
+--makes a new monitor file and renames current to old
+ROUTINE ru_swap_monitor_files
+VAR ls_temp : STRING[ki_errstr_len]
+BEGIN
+  ERR_TRAP_ON(39960)
+  IF FL_STATE(ks_monitor_file_name) THEN
+    IF FL_STATE(ks_old_monitor_file_name) THEN
+      $SYS_CALL_STS := 0
+      SYS_CALL('fd/NP', ks_old_monitor_file_name)
+      IF $SYS_CALL_STS <> 0 THEN
+        ls_temp := STR_CAT('Deleting file error ', ks_old_monitor_file_name)
+        ERR_POST(ki_err_file_delete, ls_temp, 4, 0x240)
+      ENDIF
+    ENDIF
+    $SYS_CALL_STS := 0
+    SYS_CALL('fr', ks_monitor_file_name, ks_old_monitor_file_name)
+    IF $SYS_CALL_STS <> 0 THEN
+      ls_temp := STR_CAT('Failed variable release ', ks_monitor_file_name)
+      ERR_POST(ki_err_file_rename, ls_temp, 4, 0x240)
+    ENDIF
+  ENDIF
+  ERR_TRAP_OFF(39960)
+END ru_swap_monitor_files
+--fold
+----build the monitor file
+ROUTINE ru_monitor_collision(ae_coll : CollData)
+VAR li_i, li_lun : INTEGER
+  lb_exist : BOOLEAN
+BEGIN
+  ERR_TRAP_ON(39990)
+  lb_exist := FL_STATE(ks_monitor_file_name)
+  $ERROR := 0
+  OPEN FILE li_lun (ks_monitor_file_name, 'wa')
+  IF $ERROR <> 0 THEN
+  ELSE
+  	
+--    IF lb_exist = FALSE THEN
+--      --file header
+--      WRITE li_lun ('    CREATED  ,', DATE, ' , VERS. 0.6 , SDEBEUL', NL)
+--      WRITE li_lun ('-------------------------------------------------------------------------------', NL)
+--    ENDIF
+   
+    WRITE li_lun (DATE,' ; ')
+    WRITE li_lun ('C; ', ve_sts.vi_CylcleCounter::4, ' ; ')
+    WRITE li_lun ('Zidx; ' , ae_coll.fi_idx::2,' ; ')
+    WRITE li_lun ('CT; ', ve_sts.vi_tempoCycleInSec::4,' ; ')
+    WRITE li_lun ('STBY; ', ve_sts.fb_stby::6, ' ; ')
+    WRITE li_lun ('CM; ',ve_sts.fb_cold::6,' ; ')
+    
+      --deteced coll thres
+      WRITE li_lun ('CD; ') 
+	      FOR li_i := 1 TO 6 DO
+	        WRITE li_lun ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i]::3, ' , ')
+	      ENDFOR
+	     WRITE li_lun(' ; ')
+   
+   IF NOT ve_sts.fb_ice THEN
+      WRITE li_lun ('CH; ')
+	      FOR li_i := 1 TO 6 DO
+	        WRITE li_lun (ae_coll.gi_coll_hot[li_i], ' , ')
+	      ENDFOR
+	 ELSE
+	 	  WRITE li_lun ('CC; ')
+	      FOR li_i := 1 TO 6 DO
+	        WRITE li_lun (ae_coll.gi_coll_cold[li_i], ' , ')
+	      ENDFOR
+	 ENDIF
+	 WRITE li_lun(' ; ')
+	 	 	  WRITE li_lun ('CA; ')
+	      FOR li_i := 1 TO 6 DO
+	        WRITE li_lun ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_actual, li_i], ' , ')
+	      ENDFOR
+	WRITE li_lun(' ; ',NL)
+  
+  CLOSE FILE li_lun
+  ENDIF
+  ERR_TRAP_OFF(39990)
+END ru_monitor_collision
+--fold
+---calc diff between 2 jointpos
+ROUTINE fu_diff_jpos(ajpos_1 , ajpos_2 : JOINTPOS):JOINTPOS
+VAR ajpos_out : JOINTPOS
+VAR li_I : INTEGER
+BEGIN
+	ajpos_out := ajpos_2
+	FOR  Li_I := 1 to 6 DO
+		ajpos_out[Li_I] := (ajpos_1[Li_I] - ajpos_2[Li_I])
+	ENDFOR
+	RETURN(ajpos_out)
+END fu_diff_jpos
+--fold
+----Routine to log currents of all 6 axxes
+ROUTINE ru_log_currents(ae_coll : CollData)
+CONST ki_smpl = 10
+CONST ki_maxLines = 600
+VAR li_i , li_count, li_lun : INTEGER 
+VAR ls_file : STRING[50]
+BEGIN
+	li_count := 0
+	ERR_TRAP_ON(39990)
+	ENCODE(ls_file,ks_currents_file_name,ae_coll.fi_idx,'.txt')
+	STR_EDIT(ls_file,str_coll)
+	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' File: ',ls_file,NL)
+	IF FL_STATE(ls_file) THEN
+		SYS_CALL('FD',ls_file)
+	ENDIF 
+  $ERROR := 0
+  OPEN FILE li_lun (ls_file, 'wa')
+  IF $ERROR <> 0 THEN
+  ELSE	
+   --file header
+   WRITE li_lun ('    CREATED  Crash current log,', DATE, ' , VERS. 0.1 , SDEBEUL', NL)
+   WRITE li_lun ('-------------------------------------------------------------------------------', NL)
+ 	 WRITE li_lun ('as1'::6,' , ','as2'::6,' , ','as3'::6,' , ','as4'::6,' , ','as5'::6,' , ','as6'::6,' , ','vel'::6,NL)
+	REPEAT
+	 FOR li_i := 1 TO 6 DO
+	 	 WRITE li_lun($CRNT_DATA[ae_coll.fi_arm].MTR_CURR[li_i]::6,' , ')
+	 ENDFOR
+	 WRITE li_lun($CRNT_DATA[ae_coll.fi_arm].ARM_VEL::6,NL)
+	 DELAY ki_smpl
+	li_count +=1
+	UNTIL (ve_sts.fb_start = false) OR (li_count = ki_maxLines)
+	  SELECT $THRD_CEXP OF
+	  	CASE(1):
+	  		WRITE li_lun ('----Zone completed',nl)
+			 	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' COMPLETED SUCCES',NL)
+	  	CASE(2):
+	  		WRITE li_lun ('----Could not complete zone... Maxline err',nl)
+		  	WRITE lun_crt ('Coll: logging currents for zone: ',ae_coll.fi_idx,' COMPLETED FAIL',NL)
+	  ENDSELECT
+	CLOSE FILE li_lun
+ ENDIF
+  ERR_TRAP_OFF(39990)
+END ru_log_currents
+--fold
+----build the log file
+ROUTINE ru_log_collision(ae_coll : CollData)
+VAR li_i, li_lun : INTEGER
+VAR lb_exist : BOOLEAN
+VAR pi_joint_start, pi_joint_stop : JOINTPOS
+BEGIN
+	pi_joint_start := ARM_JNTP
+	DELAY $TUNE[25] --systeem var for locking the arm 
+	pi_joint_stop := ARM_JNTP
+  
+  ERR_TRAP_ON(39990)
+  lb_exist := FL_STATE(ks_log_file_name)
+  $ERROR := 0
+  OPEN FILE li_lun (ks_log_file_name, 'wa')
+  IF $ERROR <> 0 THEN
+  ELSE
+	IF lb_exist = FALSE THEN
+      --file header
+   WRITE li_lun ('    CREATED  Crash log,', DATE, ' , VERS. 0.1 , SDEBEUL', NL)
+   WRITE li_lun ('-------------------------------------------------------------------------------', NL)
+  ENDIF
+	--
+  WRITE li_lun ('Crash logged for zone: ', ae_coll.fi_idx, NL)
+  WRITE li_lun ('logged on    ', DATE, NL)
+  --jointpos log
+  WRITE li_lun ('Jointpos on start was:  ', pi_joint_start, NL)
+  WRITE li_lun ('Jointpos on stop  was:  ', pi_joint_stop, NL)
+  WRITE li_lun ('Jointpos deflection  :  ',fu_diff_jpos(pi_joint_start,pi_joint_stop) ,NL)
+  --chain log
+  WRITE li_lun ('PROGRAM chain on crash', NL)
+  ERR_TRAP_ON(39960)   -- trap SYS_CALL errors
+  $SYS_CALL_OUT := li_lun   -- directs sys_call output to Logfile
+  SYS_CALL('pv/c', 'rsssssrr')   --send system command program view/chain down the pipe
+  ERR_TRAP_OFF(39960)
+  --trapping to handle case that rsssssrr is not active  
+  IF $SYS_CALL_STS > 0 THEN   -- check status of SYS_CALL
+    WRITE LUN_CRT ('program rssssr is not active! EXIT Colllog due to user error', NL)
+    RETURN
+  ENDIF
+  WRITE li_lun (NL,'-----------------------------------------------------------------------------------', NL)
+  WRITE lun_crt ('Coll: LOGGED for zone: ',ae_coll.fi_idx,nl)
+	CLOSE FILE li_lun
+  ENDIF
+  ERR_TRAP_OFF(39990)
+  ENABLE CONDITION[ki_cond_rob_coll]
+END ru_log_collision
+--fold
+--------------------------------------------------------------------------------------------
+ROUTINE ru_calc_coll(ae_coll : CollData)
+VAR li_i : INTEGER
+VAR vb_ot: BOOLEAN(true)
+BEGIN
+	--If robot ice cold and no cold dataset.
+IF (ae_coll.fb_det_coll_cold = FALSE)  AND (ve_sts.fb_ice = true) THEN
+      WRITE lun_crt('Coll: Collision COLD CALCULATED:',ae_coll.fi_idx,NL)
+      ae_coll.fb_det_coll_cold := TRUE
+      FOR li_i := 1 TO 6 DO   
+        IF ($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < ae_coll.gi_coll_cold[li_i]) OR (ae_coll.gi_coll_cold[li_i] = 10) THEN
+           ae_coll.gi_coll_cold[li_i] := ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])
+        ENDIF
+      ENDFOR  
+      
+  --If running in hot mode
+ELSE
+    IF NOT ae_coll.fb_det_coll_hot AND ve_setup.fb_mstrTchEnbl THEN
+     	--to get on target fast.
+     	FOR li_i := 1 TO 6 DO
+     		IF ae_coll.gi_coll_hot[li_i] = 10 THEN
+     			ae_coll.gi_coll_hot[li_i] := (ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])-ve_setup.fi_reduce_step)
+     			WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' Init sens ! ',ae_coll.gi_coll_hot[li_i],NL)
+     		ENDIF
+     	ENDFOR
+     
+      FOR li_i := 1 TO 6 DO
+-- If Calc thrs more then x% sensitive than old REDUCE
+          IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] > (ae_coll.gi_coll_hot[li_i] + ae_coll.fi_ot_prct) THEN
+            	WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' Increse sens ',ve_setup.fi_reduce_step,'%  ',ae_coll.gi_coll_hot[li_i],' -> ',$ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i],NL)
+            	ae_coll.gi_coll_hot[li_i] += ve_setup.fi_reduce_step
+            	vb_ot := false
+          ELSE
+-- If calc thrs less then old UP sens
+--IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < (ae_coll.gi_coll_hot[li_i] - ae_coll.fi_ot_prct) THEN
+	            IF $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i] < (ae_coll.gi_coll_hot[li_i] - 2) THEN
+	              WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' REDUCED SENSITIVITY ! ',ae_coll.gi_coll_hot[li_i],'-> ',ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i]),NL)
+	              ae_coll.gi_coll_hot[li_i] := ROUND($ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_detect, li_i])
+	              ae_coll.fi_ot_counter := 0
+	              vb_ot := false
+	            ELSE
+--ON TARGET
+          		--WRITE lun_crt('Collzone: ',ae_coll.fi_idx, ' Axis: ',li_i,' ON TARGET',NL)
+	            ENDIF
+          ENDIF
+      ENDFOR
+      
+    --check if all axes on target
+    IF vb_ot THEN
+    	ae_coll.fi_ot_counter += 1
+    	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' ON TARGET ',ae_coll.fi_ot_counter,'/',ve_setup.fi_ot,NL)
+    ENDIF
+    --COMMIT
+    IF ae_coll.fi_ot_counter >=  ve_setup.fi_ot THEN
+     	WRITE lun_crt('Collzone: ',ae_coll.fi_idx,' HOT COMPLETED :)!',NL)
+    	ae_coll.fb_det_coll_hot := true 
+    	ru_commit_setup(ae_coll)
+    	ru_save_var
+    ENDIF
+          
+  ENDIF
+ENDIF
+END ru_calc_coll
+--fold    
+---------------------------------------------------------------------------------------------
+----Sets the default coll data to the default value-----
+ROUTINE ru_collision_low(ae_coll : CollData)
+BEGIN
+ 
+  -- collision sempre attive per sicurezza
+  $COLL_TYPE := ki_coll_dflt
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 1] := 40
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 2] := 30
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 3] := 30
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 4] := 30
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 5] := 30
+  $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_dflt, 6] := 25
+  $CRNT_DATA[ae_coll.fi_arm].COLL_ENBL := ve_setup.fb_mstrEnbl
+END ru_collision_low
+--fold
+----sets compliance active if needed
+ROUTINE ru_set_comp(ae_coll : collData)
+VAR li_i : INTEGER 
+BEGIN
+	FOR li_i := 1 to 6 DO
+		$COLL_SOFT_PER[ki_coll_actual,li_i] := ae_coll.gi_cmpl[li_i]
+	ENDFOR 
+	IF ve_setup.fb_mstrCmplEnbl AND ae_coll.fb_CmplEnbl THEN
+	 BIT_SET($ARM_DATA[ae_coll.fi_arm].A_ALONG_1D[12],11)
+	ELSE
+	 BIT_CLEAR($ARM_DATA[ae_coll.fi_arm].A_ALONG_1D[12],11)
+  ENDIF
+END ru_set_comp
+--fold
+----to set colldata
+ROUTINE ru_set_coll(ae_coll : collData)
+VAR li_i, li_rid : INTEGER
+BEGIN	
+IF not ve_sts.fb_cold THEN --Hot mode
+	FOR li_i := 1 TO 6 DO
+    li_rid := (ae_coll.gi_coll_hot[li_i] * (ve_setup.fi_mstrPrct+ae_coll.fi_prct)) DIV 100 --mstr% AND zone reduction
+	    IF ve_setup.fb_sysPrct THEN
+				li_rid := li_rid + ((ae_coll.gi_coll_hot[li_i] * ve_setup.gi_sysPrct[li_i]) DIV 100) -- %reduction per axes (costum data) --axes reduction
+	    ENDIF
+    $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_actual, li_i] := ROUND(ae_coll.gi_coll_hot[li_i] - li_rid)
+  ENDFOR
+ELSE -- cold mode
+	FOR li_i := 1 TO 6 DO
+    li_rid := (ae_coll.gi_coll_cold[li_i] * (ve_setup.fi_mstrPrct+ae_coll.fi_prct)) DIV 100
+	    IF ve_setup.fb_sysPrct THEN
+				li_rid := li_rid + ((ae_coll.gi_coll_cold[li_i] * ve_setup.gi_sysPrct[li_i]) DIV 100) -- %reduction per axes (costum data) --axes reduction
+		  ENDIF
+    $ARM_DATA[ae_coll.fi_arm].ARM_SENSITIVITY[ki_coll_actual, li_i] := ROUND(ae_coll.gi_coll_cold[li_i] - li_rid)
+  ENDFOR
+ENDIF
+ru_set_comp(ae_coll)
+  $COLL_EFFECT := ve_setup.fi_CollEffect
+  $COLL_TYPE := ki_coll_actual
+  $CRNT_DATA[ae_coll.fi_arm].COLL_ENBL := ve_setup.fb_mstrEnbl
+END ru_set_coll
+--fold
+----to swap to cold data set
+ROUTINE ru_swap_collision(ae_coll : CollData)
+VAR li_ib : INTEGER
+  li_rid : INTEGER
+BEGIN
+  IF ae_coll.fb_det_coll_cold = FALSE THEN
+    WRITE lun_crt('Coll: Cold mode on (Default mode)',NL)
+    ru_collision_low(ae_coll)
+    RETURN
+  ENDIF
+ve_sts.fb_cold := TRUE
+ru_set_coll(ae_coll)
+WRITE lun_crt('Coll: Cold mode on',NL)
+END ru_swap_collision
+--fold
+----to reduce te ACTIVE col by a global %
+ROUTINE ru_red_active(ai_prct : INTEGER)
+VAR li_i, Li_rid : INTEGER
+BEGIN
+	WRITE lun_crt ('Coll: Stby mode:  Active coll set reduced by ',ai_prct,' %',nl)
+	FOR li_i := 1 to 6 DO
+	  li_rid := ($ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i] * ai_prct) DIV 100 
+    $ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i] := ROUND($ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i] - li_rid)
+  ENDFOR
+END ru_red_active
+--fold
+--------------------------------------------------------------------------------------------
+-- Exported routines
+ROUTINE CollisionEnd EXPORTED FROM CollMngr GLOBAL
+ROUTINE CollisionEnd
+BEGIN
+  --if not running return
+  IF ve_sts.fb_start = FALSE THEN
+    RETURN
+    WRITE lun_crt('Coll: Coll end but not running',nl)
+  ELSE
+  	 ve_sts.fb_start := FALSE
+  ENDIF
+  
+  IF VAR_UNINIT(ve_Coll.fi_arm) THEN
+   -- ERR_POST(ki_err_var_uninit, 'Coll: ve_coll.fi_arm uninit! ', 4, 0x240)
+    RETURN
+  ENDIF
+  --calc cycletime
+  ve_sts.vi_tempoCycleInSec := $TIMER[ki_timer_cycletime] DIV 1000
+  --stop thrs calc
+  ARM_COLL_THRS(ve_Coll.fi_arm, ki_coll_detect, 0, FALSE) 
+	ru_check_var(ve_Coll)
+	
+  IF ve_Coll.fb_det_coll_hot THEN
+    WHILE PROG_STATE(ks_myname) > 0 DO
+      DELAY 50 --Bug reported .. stuk after pwrfail rec !
+    ENDWHILE
+    ve_sts.vi_SaveCounter += 1
+  ENDIF
+ 
+ IF ve_sts.fb_end THEN
+  ve_sts.vi_CylcleCounter += 1
+  ve_sts.vi_LogNumbr += 1
+ 	WRITE lun_crt('----Coll: ','Start of new Cycle ',ve_sts.vi_CylcleCounter,' ---- ',NL)
+  -- onthoud tijd van laatste cycle
+  ve_sts.vi_time_lstcycle := CLOCK
+ ENDIF
+ 
+  IF ve_sts.vi_LogNumbr > ve_setup.fi_max_cycles THEN
+    ru_swap_monitor_files
+    DELAY 300
+    ve_sts.vi_LogNumbr := 0
+  ENDIF
+  
+  ru_calc_coll(ve_Coll)
+  -- write data to log file
+  ru_monitor_collision(ve_Coll)
+  --set coll data back to default values
+  ru_collision_low(ve_Coll)
+  --unlink the object
+  VAR_UNLINK(ve_Coll)
+  IF $THRD_ERROR <> 0 THEN
+    ERR_POST(ki_err_var_unlink, 'Variable unlink', 4, 0x240)
+  ENDIF
+END CollisionEnd
+
+--fold
+ROUTINE CollisionStart(ae_coll : CollData) EXPORTED FROM CollMngr GLOBAL
+ROUTINE CollisionStart(ae_coll : CollData)
+VAR li_i : INTEGER
+BEGIN
+	ru_stp_init
+	
+	--check if cycle already active and end cycle if it is.
+	IF VAR_UNINIT(ve_sts.fb_start) THEN
+		ve_sts.fb_start := false
+	ENDIF
+	
+ IF ve_sts.fb_start THEN
+	CollisionEnd
+	ve_sts.fb_end := false		
+ ELSE
+ 	ve_sts.fb_end := true
+ ENDIF
+   
+  --init
+  $SYS_CALL_OUT := LUN_NULL
+  ERR_TRAP_ON(40081) --bad var link
+  ERR_TRAP_ON(40082) --unable to unlink var
+  ERR_TRAP_ON(0x9C72)
+  $ERROR := 0
+  $THRD_ERROR := 0
+  -- Links the var parsed by the routine to ve_coll of collmngr
+  VAR_LINK(ve_Coll, ae_coll)
+  IF $THRD_ERROR <> 0 THEN
+    ERR_POST(ki_err_var_link, 'Variable link ', 4, 0x240)
+  ENDIF
+  
+  ru_check_var(ae_coll)
+  ru_set_zone_idx(ae_coll)
+
+  ru_deact_me
+  
+  --activate the program if in auto mode 
+  IF $SDOUT[11] OR $SDOUT[17] OR $SDOUT[1] THEN
+    ru_activate_me
+  ENDIF
+
+--Run in HOT mode  
+  --If FULL auto and init detection done 
+  IF ($GEN_OVR = 100) AND (ve_sts.fb_stby = FALSE) AND (ae_coll.fb_det_coll_hot = TRUE) AND ($SDOUT[ki_sdout_sel_manu] = OFF) THEN
+		ru_set_coll(ae_coll)
+  ELSE
+--Run in COLD mode
+    IF ae_coll.fb_det_coll_cold THEN
+			ru_set_coll(ae_coll)
+    ELSE
+ --Run in Default mode
+      ru_collision_low(ae_coll)
+    ENDIF
+  ENDIF
+  
+IF ve_setup.fb_mstrTchEnbl THEN
+  ARM_COLL_THRS(ae_coll.fi_arm, ki_coll_detect, 1, FALSE)
+ENDIF
+
+  ve_sts.fb_start := TRUE
+  $TIMER[ki_timer_cycletime] := 0
+  ERR_TRAP_OFF(40081)
+  ERR_TRAP_OFF(40082)
+  ERR_TRAP_OFF(0x9C72)
+END CollisionStart
+ --fold 
+ROUTINE CollisionSetSoftTeach EXPORTED FROM CollMngr GLOBAL
+ROUTINE CollisionSetSoftTeach
+VAR li_i : INTEGER
+BEGIN 
+	FOR li_I := 1 to 6 DO
+	 $ARM_DATA[1].ARM_SENSITIVITY[ki_coll_actual, li_i]:= 80
+	 $COLL_SOFT_PER[ki_coll_actual,li_i] := 100
+	ENDFOR
+BIT_SET($ARM_DATA[1].A_ALONG_1D[12],11)
+$COLL_EFFECT := 1
+$COLL_TYPE := ki_coll_actual
+$CRNT_DATA[1].COLL_ENBL := true
+WRITE lun_crt('COLL: soft teach mode on',nl)
+END CollisionSetSoftTeach
+--fold
+--------------------------------------------------------------------------------------------
+ ---- MAIN ----
+BEGIN
+	ru_sts_init
+  ve_sts.fb_start := FALSE
+  
+  -- CONDITION Drive of OR cold cold activeation. (robot must already be in standby for this)
+  CONDITION[ki_cond_check_allarm] :
+    WHEN $SDOUT[ki_sdout_drive_on]- OR ($TIMER[ki_timer_time_out] > ve_setup.fi_tempo_active_coll_cold) DO
+      ru_swap_collision(ve_Coll)
+    WHEN $GEN_OVR < 100 DO
+			ru_swap_collision(ve_Coll)
+    WHEN ve_sts.fb_start = FALSE DO --to purge condition
+  ENDCONDITION
+  
+  -- CONDITION to check if the robot is standing still
+  CONDITION[ki_cond_time_out] :
+    WHEN $CRNT_DATA[ve_Coll.fi_arm].MOVE_STATE <= ki_no_move DO
+      $TIMER[ki_timer_time_out] := 0
+      ve_sts.fb_rob_move := true
+      ENABLE CONDITION[ki_cond_rob_move]
+    WHEN ve_sts.fb_start = FALSE DO
+  ENDCONDITION
+  
+  -- CONDITION to check if robot is moving
+  CONDITION[ki_cond_rob_move] :
+    WHEN $CRNT_DATA[ve_Coll.fi_arm].MOVE_STATE > ki_no_move DO
+    	ve_sts.fb_rob_move := false
+      ENABLE CONDITION[ki_cond_time_out]
+    WHEN $TIMER[ki_timer_time_out] > ve_setup.fi_tempo_active_reduce DO
+      ru_red_active(ve_setup.fi_Stby_prct)
+    WHEN ve_sts.fb_start = FALSE DO
+  ENDCONDITION
+  
+  --crashlog
+  CONDITION[ki_cond_rob_coll]:
+  	WHEN EVENT ki_event_rob_coll OR ERRORNUM ki_errornum_rob_coll DO 
+  		ru_log_collision(ve_coll)
+  ENDCONDITION
+  
+  --currentlog
+  CONDITION[ki_cond_rob_current]:
+  	WHEN ve_sts.fb_start DO
+  		ru_log_currents(ve_coll)
+  ENDCONDITION
+ 
+  WAIT FOR ve_sts.fb_start
+  	ENABLE CONDITION[ki_cond_rob_coll]
+  	ENABLE CONDITION[ki_cond_check_allarm]
+  IF ve_setup.fi_tempo_active_reduce <> 0 THEN
+  	ENABLE CONDITION[ki_cond_time_out]
+	ENDIF
+	IF ve_setup.fb_Dbg THEN
+    ENABLE CONDITION[ki_cond_rob_current]
+  ENDIF
+  WAIT FOR ve_sts.fb_start = OFF
+  
+  --If true save var
+  IF ve_sts.fb_save OR (ve_sts.vi_SaveCounter > 100) THEN
+    ru_save_var
+    ve_sts.fb_save := FALSE
+    ve_sts.vi_SaveCounter := 0
+  ENDIF
+  
+  DELAY 300
+END CollMngr
+
